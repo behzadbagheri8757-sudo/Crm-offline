@@ -701,16 +701,17 @@ function openAddProduct(editId){
       p.priceHistory = p.priceHistory||[];
       p.priceHistory.push({date:pdate, buy, wholesale, retail});
       if(stockQty !== p.stockQty){
-        p.stockLog = p.stockLog||[];
-        p.stockLog.push({id:uid(), date:todayISO(), type:'adjust', qty:stockQty-(p.stockQty||0), note:'ویرایش دستی موجودی'});
-        p.stockQty = stockQty;
+        manualStockAdjustAbsolute(p.id, stockQty, 'ویرایش دستی موجودی');
       }
       await saveData();
       return p;
     } else {
       const np = {id:uid(), name, category, packageWeight, buy, wholesale, retail, sell:retail,
-        stockQty, minStock, priceHistory:[{date:pdate, buy, wholesale, retail}], stockLog: stockQty?[{id:uid(),date:todayISO(),type:'in',qty:stockQty,note:'موجودی اولیه'}]:[], active:true};
+        stockQty:0, minStock, priceHistory:[{date:pdate, buy, wholesale, retail}], stockLog: [], active:true};
       data.products.push(np);
+      if(stockQty>0){
+        manualStockIn(np.id, stockQty, 'موجودی اولیه');
+      }
       await saveData();
       return np;
     }
@@ -730,9 +731,7 @@ function openAddProduct(editId){
     document.getElementById('stock-in').addEventListener('click', async ()=>{
       const q = numVal(document.getElementById('f-adjust-qty'));
       if(q<=0){ showToast('مقدار رو وارد کن'); return; }
-      p.stockQty = (p.stockQty||0) + q;
-      p.stockLog = p.stockLog||[];
-      p.stockLog.push({id:uid(), date:todayISO(), type:'in', qty:q, note:'ورود کالا'});
+      manualStockIn(p.id, q, 'ورود کالا');
       await saveData(); openAddProduct(p.id); showToast('موجودی اضافه شد');
     });
     document.getElementById('stock-out').addEventListener('click', async ()=>{
@@ -741,9 +740,7 @@ function openAddProduct(editId){
       if(q > (p.stockQty||0)){
         if(!confirm('موجودی فعلی «'+p.name+'» فقط '+(p.stockQty||0)+' عدد است.\n\nبا این خروج، موجودی منفی می‌شود. مطمئنی می‌خوای ادامه بدی؟')) return;
       }
-      p.stockQty = (p.stockQty||0) - q;
-      p.stockLog = p.stockLog||[];
-      p.stockLog.push({id:uid(), date:todayISO(), type:'out', qty:-q, note:'خروج/اصلاح دستی'});
+      manualStockOut(p.id, q, 'خروج/اصلاح دستی');
       await saveData(); openAddProduct(p.id); showToast('موجودی کم شد');
     });
   }
@@ -1346,19 +1343,23 @@ function openInvoiceForm(cid, editInv){
         return { productId:r.productId, name:prod.name, qty:r.qty, price:r.price, buyPrice:(r.buyPrice!==undefined?r.buyPrice:prod.buy), discount:r.discount||0, weight:(prod.packageWeight||0)*r.qty };
       });
 
-      // جلوگیری از موجودی منفی: قبل از هر تغییری، مجموع مقدار درخواستی هر کالا رو با موجودی قابل استفاده مقایسه کن
-      const neededByProduct = {};
-      items.forEach(it=>{ neededByProduct[it.productId] = (neededByProduct[it.productId]||0) + it.qty; });
-      const oldQtyByProduct = {};
-      if(editInv){ (editInv.items||[]).forEach(it=>{ oldQtyByProduct[it.productId] = (oldQtyByProduct[it.productId]||0) + it.qty; }); }
-      const shortages = [];
-      Object.keys(neededByProduct).forEach(pid=>{
-        const prod = data.products.find(p=>p.id===pid);
-        if(!prod) return;
-        const available = (prod.stockQty||0) + (oldQtyByProduct[pid]||0);
-        if(neededByProduct[pid] > available) shortages.push(`${prod.name}\nموجودی فعلی: ${available}\nمقدار درخواستی: ${neededByProduct[pid]}`);
-      });
-      if(shortages.length){ alert('موجودی کالا کافی نیست.\n\n'+shortages.join('\n\n')); btn.disabled = false; return; }
+      // BLOCK فروش بیش از stock یا بیش از لایه‌های FIFO — قبل از هر mutation
+      const creditStock = {};
+      const creditFifo = {};
+      if(editInv){
+        const pids = {};
+        (editInv.items||[]).forEach(it=>{ if(it.productId) pids[it.productId]=true; });
+        Object.keys(pids).forEach(pid=>{
+          creditStock[pid] = (editInv.items||[]).filter(it=>it.productId===pid).reduce((s,it)=>s+(it.qty||0),0);
+          creditFifo[pid] = invoiceReleasedFifoQty(editInv, pid);
+        });
+      }
+      const stockCheck = validateSaleAvailability(items, creditStock, creditFifo);
+      if(!stockCheck.ok){
+        alert(stockCheck.error || 'موجودی کافی نیست یا موجودی FIFO با موجودی کالا ناسازگار است.');
+        btn.disabled = false;
+        return;
+      }
 
       const total = invoiceTotal();
       const paid = cashPaid+cardPaid+transferPaid+checkAmount;
@@ -1375,6 +1376,8 @@ function openInvoiceForm(cid, editInv){
         const checkMeta = existingCheck ? {checkNumber:existingCheck.checkNumber, status:existingCheck.status} : null;
 
         // ۱) برگردوندن اثر فاکتور قبلی: موجودی کالاها + حذف پرداخت/چک مرتبط با همین فاکتور
+        const oldItemsSnap = editInv.items;
+        const oldDateSnap = editInv.date;
         revertInvoiceStockEffects(editInv);
         revertInvoicePayments(editInv);
 
@@ -1383,8 +1386,20 @@ function openInvoiceForm(cid, editInv){
         editInv.prevBalance = prevBalance; editInv.cashPaid = cashPaid; editInv.cardPaid = cardPaid;
         editInv.transferPaid = transferPaid; editInv.checkPaid = checkAmount; editInv.newBalance = newBalance;
 
-        // ۳) اعمال دوباره‌ی موجودی/پرداخت‌ها با همون توابعی که برای ثبت فاکتور جدید استفاده میشه
-        applyInvoiceStockEffects(items, date, editInv, false);
+        // ۳) اعمال دوباره‌ی موجودی/پرداخت‌ها — اگر BLOCK شد، فاکتور قبلی را برگردان
+        try{
+          applyInvoiceStockEffects(items, date, editInv, false);
+        }catch(e){
+          editInv.date = oldDateSnap; editInv.items = oldItemsSnap;
+          editInv.total = before.total; editInv.discount = before.discount; editInv.discountType = before.discountType;
+          editInv.cashPaid = before.cashPaid; editInv.cardPaid = before.cardPaid;
+          editInv.transferPaid = before.transferPaid; editInv.checkPaid = before.checkPaid;
+          applyInvoiceStockEffects(oldItemsSnap, oldDateSnap, editInv, false);
+          pushInvoicePayments(cid, editInv, before.cashPaid, before.cardPaid, before.transferPaid, before.checkPaid, checkDue, checkMeta);
+          alert((e && e.message) || 'موجودی کافی نیست یا موجودی FIFO با موجودی کالا ناسازگار است.');
+          btn.disabled = false;
+          return;
+        }
         pushInvoicePayments(cid, editInv, cashPaid, cardPaid, transferPaid, checkAmount, checkDue, checkMeta);
 
         // ۴) ثبت این ویرایش در تاریخچه‌ی خود فاکتور
@@ -1400,11 +1415,18 @@ function openInvoiceForm(cid, editInv){
       }
 
       const newInv = {
-        id:uid(), number:nextInvoiceNumber(), customerId:cid, date, items, total, discount, discountType,
+        id:uid(), number:null, customerId:cid, date, items, total, discount, discountType,
         prevBalance, cashPaid, cardPaid, transferPaid, checkPaid:checkAmount, newBalance,
       };
+      try{
+        applyInvoiceStockEffects(items, date, newInv, true);
+      }catch(e){
+        alert((e && e.message) || 'موجودی کافی نیست یا موجودی FIFO با موجودی کالا ناسازگار است.');
+        btn.disabled = false;
+        return;
+      }
+      newInv.number = nextInvoiceNumber();
       data.invoices.push(newInv);
-      applyInvoiceStockEffects(items, date, newInv, true);
       pushInvoicePayments(cid, newInv, cashPaid, cardPaid, transferPaid, checkAmount, checkDue, null);
       await saveData(); render(); showToast('فاکتور ثبت شد');
       openSheet(`
@@ -1846,14 +1868,9 @@ function openSupplierDetail(sid){
             id:uid(), date, qty:totalQty, amount:totalAmount,
             items: lineReturns.map(l=>({itemId:l.itemId, productId:l.productId, qty:l.qty, amount:Math.round(l.qty*l.unitCost)})),
           });
-          lineReturns.forEach(l=>{
-            const prod = data.products.find(x=>x.id===l.productId);
-            if(prod){
-              prod.stockQty = (prod.stockQty||0) - l.qty;
-              prod.stockLog = prod.stockLog||[];
-              prod.stockLog.push({id:uid(), date, type:'out', qty:-l.qty, note:'برگشت خرید به '+s.name});
-            }
-          });
+          const retLines = lineReturns.map(l=>({productId:l.productId, qty:l.qty, itemId:l.itemId}));
+          const retResult = applyPurchaseReturnStockEffects(p, retLines, s.name, date);
+          if(!retResult.ok){ alert(retResult.error||'برگشت خرید ممکن نشد'); return; }
           await saveData(); openSupplierDetail(sid); render(); showToast('برگشت خرید ثبت شد');
         });
         return;
@@ -1897,12 +1914,8 @@ function openSupplierDetail(sid){
         p.returns = p.returns||[];
         p.returns.push({id:uid(), date, qty, amount});
         if(p.productId && qty>0){
-          const prod = data.products.find(x=>x.id===p.productId);
-          if(prod){
-            prod.stockQty = (prod.stockQty||0) - qty;
-            prod.stockLog = prod.stockLog||[];
-            prod.stockLog.push({id:uid(), date, type:'out', qty:-qty, note:'برگشت خرید به '+s.name});
-          }
+          const retResult = applyPurchaseReturnStockEffects(p, [{productId:p.productId, qty}], s.name, date);
+          if(!retResult.ok){ alert(retResult.error||'برگشت خرید ممکن نشد'); return; }
         }
         await saveData(); openSupplierDetail(sid); render(); showToast('برگشت خرید ثبت شد');
       });

@@ -155,19 +155,28 @@ function supplierTotals(sid){
   return { purchaseTotal, payTotal, returnTotal, openingBalance, balance: openingBalance + purchaseTotal - payTotal - returnTotal };
 }
 
+/** ارزش موجودی یک کالا از لایه‌های open (نه product.buy) */
+function productInventoryValue(productId){
+  return (data.inventoryLayers||[]).reduce((s,l)=>{
+    if(l.productId!==productId) return s;
+    if(l.status==='voided' || l.status==='depleted') return s;
+    const q = Number(l.qtyRemaining)||0;
+    if(!(q>0)) return s;
+    // status خالی/نامشخص ولی qtyRemaining>0 را open حساب کن
+    if(l.status && l.status!=='open') return s;
+    return s + q * (Number(l.unitCost)||0);
+  }, 0);
+}
+
 function inventoryValue(){
-  // FIFO: ارزش انبار از لایه‌های قابل مصرف (open + qtyRemaining>0)
-  const layers = (data.inventoryLayers||[]);
-  if(layers.length){
-    return layers.reduce((s,l)=>{
-      if(l.status!=='open') return s;
-      const q = l.qtyRemaining||0;
-      if(!(q>0)) return s;
-      return s + q * (l.unitCost||0);
-    }, 0);
-  }
-  // fallback legacy قبل از migration
-  return data.products.reduce((s,p)=>s + (p.stockQty||0)*(p.buy||0), 0);
+  // همیشه از لایه‌های قابل مصرف — هرگز stockQty × product.buy
+  return (data.inventoryLayers||[]).reduce((s,l)=>{
+    if(l.status==='voided' || l.status==='depleted') return s;
+    const q = Number(l.qtyRemaining)||0;
+    if(!(q>0)) return s;
+    if(l.status && l.status!=='open') return s;
+    return s + q * (Number(l.unitCost)||0);
+  }, 0);
 }
 
 // یک نقطه‌ی واحد برای خوندن اقلام یک خرید: چندقلمی جدید، یا تک‌کالای قدیمی، یا بدون کالا

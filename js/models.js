@@ -22,7 +22,7 @@ const PRERESTORE_KEY = 'preRestoreSnapshot';
 
 // schema versioning (data shape itself is unchanged/backward-compatible;
 // this is just a marker so future migrations can tell old saves apart)
-const CURRENT_SCHEMA_VERSION = 2;
+const CURRENT_SCHEMA_VERSION = 3;
 
 // simple rotating auto-backup, stored as extra rows in the same IndexedDB
 // object store — no new library, no new database
@@ -48,6 +48,10 @@ function emptyData(){
   //    // when method==='check':
   //    faceAmount, checkNumber?, bank?, issueDate?, dueDate?, status:'pending'|'cleared'|'bounced'}
   // Customer receivable checks remain only in top-level data.checks (unchanged).
-  return { products: [], customers: [], invoices: [], payments: [], checks: [], suppliers: [], invoiceSeq: 1000, schemaVersion: CURRENT_SCHEMA_VERSION };
+  // inventoryLayers: FIFO cost layers for stock (purchase / manual / sale-return orphans)
+  // { id, purchaseId, productId, itemId?, qtyOriginal, qtyRemaining, unitCost,
+  //   status:'open'|'depleted'|'voided', source:'purchase'|'manual-in'|'manual-adjust'|'sale-return'|'sale-revert',
+  //   date?, note? }
+  return { products: [], customers: [], invoices: [], payments: [], checks: [], suppliers: [], inventoryLayers: [], invoiceSeq: 1000, schemaVersion: CURRENT_SCHEMA_VERSION };
 }
 

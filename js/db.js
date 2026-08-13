@@ -52,6 +52,93 @@ async function dbDelete(key){
 
 // normalize / migrate any older data shape into the current schema so old
 // backups (or the previous version of this app) keep working
+
+// ---------- FIFO migration (idempotent, no historical COGS rewrite) ----------
+function migrateBuildInventoryLayers(d){
+  const layers = [];
+  const existingKeys = new Set();
+  function key(purchaseId, productId, itemId){
+    return String(purchaseId)+'|'+String(productId)+'|'+String(itemId||'');
+  }
+  (d.suppliers||[]).forEach(s=>{
+    (s.purchases||[]).forEach(purchase=>{
+      // multi-item
+      if(Array.isArray(purchase.items) && purchase.items.length){
+        purchase.items.forEach(it=>{
+          if(!it.productId || !(it.qty>0)) return;
+          const unitCost = (it.unitCost>0) ? it.unitCost : ((it.lineAmount>0 && it.qty>0) ? it.lineAmount/it.qty : 0);
+          // subtract returns for this item if present
+          let returned = 0;
+          (purchase.returns||[]).forEach(r=>{
+            if(Array.isArray(r.items)){
+              r.items.filter(x=>x.itemId===it.id || x.productId===it.productId).forEach(x=>{ returned += Number(x.qty)||0; });
+            }
+          });
+          const qtyOrig = Number(it.qty)||0;
+          const qtyRem = Math.max(0, qtyOrig - returned);
+          const k = key(purchase.id, it.productId, it.id);
+          if(existingKeys.has(k)) return;
+          existingKeys.add(k);
+          layers.push({
+            id: (typeof uid==='function'?uid():('L'+Math.random().toString(36).slice(2))),
+            purchaseId: purchase.id,
+            productId: it.productId,
+            itemId: it.id||null,
+            qtyOriginal: qtyOrig,
+            qtyRemaining: qtyRem,
+            unitCost: unitCost,
+            status: qtyRem>0 ? 'open' : 'depleted',
+            source: 'purchase',
+            date: purchase.date||'',
+            note: 'migration',
+          });
+        });
+      } else if(purchase.productId && purchase.qty>0){
+        const qtyOrig = Number(purchase.qty)||0;
+        let unitCost = 0;
+        if(qtyOrig>0 && purchase.amount>0) unitCost = purchase.amount / qtyOrig;
+        let returned = (purchase.returns||[]).reduce((a,r)=>a+(Number(r.qty)||0),0);
+        const qtyRem = Math.max(0, qtyOrig - returned);
+        const k = key(purchase.id, purchase.productId, '');
+        if(existingKeys.has(k)) return;
+        existingKeys.add(k);
+        layers.push({
+          id: (typeof uid==='function'?uid():('L'+Math.random().toString(36).slice(2))),
+          purchaseId: purchase.id,
+          productId: purchase.productId,
+          itemId: null,
+          qtyOriginal: qtyOrig,
+          qtyRemaining: qtyRem,
+          unitCost: unitCost,
+          status: qtyRem>0 ? 'open' : 'depleted',
+          source: 'purchase',
+          date: purchase.date||'',
+          note: 'migration',
+        });
+      }
+    });
+  });
+
+  // Drain excess remaining vs current stockQty (deterministic FIFO) — no fake cost layers
+  (d.products||[]).forEach(prod=>{
+    const stock = Number(prod.stockQty)||0;
+    const prodLayers = layers.filter(l=>l.productId===prod.id && l.status==='open').sort((a,b)=>(a.date||'').localeCompare(b.date||'')||String(a.id).localeCompare(String(b.id)));
+    let sumRem = prodLayers.reduce((s,l)=>s+(l.qtyRemaining||0),0);
+    let excess = sumRem - stock;
+    if(excess>1e-9){
+      for(const layer of prodLayers){
+        if(excess<=0) break;
+        const take = Math.min(layer.qtyRemaining||0, excess);
+        layer.qtyRemaining = (layer.qtyRemaining||0) - take;
+        excess -= take;
+        if(layer.qtyRemaining<=0){ layer.qtyRemaining=0; layer.status='depleted'; }
+      }
+    }
+    // if stock > sumRem: do NOT invent cost; leave discrepancy (documented risk)
+  });
+  return layers;
+}
+
 function normalizeData(parsed){
   const d = emptyData();
   if(!parsed || typeof parsed !== 'object') return d;
@@ -123,6 +210,47 @@ function normalizeData(parsed){
     })),
     payments:s.payments||[],
   }));
+  // inventory layers (FIFO)
+  // schema < 3 or missing/empty layers → build from real purchases (never claim empty=[] is migration)
+  if(inputSchemaVersion >= 3 && Array.isArray(parsed.inventoryLayers) && parsed.inventoryLayers.length){
+    d.inventoryLayers = parsed.inventoryLayers.map(l=>({
+      id: l.id||uid(),
+      purchaseId: l.purchaseId||null,
+      productId: l.productId,
+      itemId: l.itemId||null,
+      qtyOriginal: Number(l.qtyOriginal)||0,
+      qtyRemaining: Number(l.qtyRemaining)||0,
+      unitCost: Number(l.unitCost)||0,
+      status: l.status||'open',
+      source: l.source||'purchase',
+      date: l.date||'',
+      note: l.note||'',
+    }));
+  } else {
+    d.inventoryLayers = migrateBuildInventoryLayers(d);
+  }
+
+  // invoice item costAllocations preserved when present (no rewrite of historical buyPrice)
+  d.invoices = d.invoices.map((inv, idx)=>{
+    const src = (parsed.invoices||[])[idx];
+    if(!src) return inv;
+    inv.items = (inv.items||[]).map((it, j)=>{
+      const sit = (src.items||[])[j];
+      if(sit && Array.isArray(sit.costAllocations)){
+        it.costAllocations = sit.costAllocations.map(a=>({
+          layerId: a.layerId||null,
+          qty: Number(a.qty)||0,
+          unitCost: Number(a.unitCost)||0,
+          cost: Number(a.cost)||0,
+          emergency: !!a.emergency,
+        }));
+      }
+      if(sit && sit.cogs!==undefined) it.cogs = sit.cogs;
+      return it;
+    });
+    return inv;
+  });
+
   // بعد از migration و آماده‌سازی کامل داده، همیشه نسخه‌ی فعلی schema خروجی گرفته می‌شود
   d.schemaVersion = CURRENT_SCHEMA_VERSION;
   if(inputSchemaVersion !== CURRENT_SCHEMA_VERSION){

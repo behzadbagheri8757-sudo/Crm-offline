@@ -88,7 +88,8 @@ function renderProducts(main){
         <span class="name">${esc(p.name)}${p.category?` <span class="sub" style="display:inline;">(${esc(p.category)})</span>`:''}${isOff?' <span class="badge pending">غیرفعال</span>':''}</span>
         <span class="filler"></span>
         <span class="amount">موجودی: ${p.stockQty||0} ${low?'<span class="badge low">کم</span>':''}
-          <span class="sub">خرید ${toman(p.buy)} / عمده ${toman(p.wholesale)} / مصرف‌کننده ${toman(p.retail)}</span>
+          <span class="sub">ارزش ${toman((typeof productInventoryValue==='function'?productInventoryValue(p.id):0))} ت${(p.stockQty||0)>0?` · بهای میانگین ${toman(Math.round(((typeof productInventoryValue==='function'?productInventoryValue(p.id):0)/(p.stockQty||1))))}`:''}</span>
+          <span class="sub">مرجع خرید ${toman(p.buy)} / عمده ${toman(p.wholesale)} / مصرف‌کننده ${toman(p.retail)}</span>
         </span>
       </div>`;
     }).join('');
@@ -638,7 +639,7 @@ function openAddProduct(editId){
 
     <div class="field"><label>تاریخ این تغییر قیمت</label><input id="f-pdate" type="date" value="${todayISO()}"></div>
     <div class="field" style="display:flex;gap:8px;">
-      <div style="flex:1;"><label>قیمت خرید</label><input id="f-buy" type="text" inputmode="decimal" value="${p?p.buy:''}"></div>
+      <div style="flex:1;"><label>قیمت خرید (مرجع/کاتالوگ)</label><input id="f-buy" type="text" inputmode="decimal" value="${p?p.buy:''}"></div>
       <div style="flex:1;"><label>قیمت عمده</label><input id="f-wholesale" type="text" inputmode="decimal" value="${p?p.wholesale:''}"></div>
       <div style="flex:1;"><label>قیمت مصرف‌کننده</label><input id="f-retail" type="text" inputmode="decimal" value="${p?p.retail:''}"></div>
     </div>
@@ -649,6 +650,7 @@ function openAddProduct(editId){
       <div style="flex:1;"><label>موجودی فعلی</label><input id="f-stock" type="text" inputmode="decimal" value="${p?p.stockQty||0:0}"></div>
       <div style="flex:1;"><label>حداقل موجودی هشدار</label><input id="f-minstock" type="text" inputmode="decimal" value="${p?p.minStock||0:0}"></div>
     </div>
+    ${p?`<div class="empty" style="padding:4px 0 8px;text-align:right;font-size:.8rem;">ارزش واقعی موجودی (FIFO): <b>${toman((typeof productInventoryValue==='function'?productInventoryValue(p.id):0))} ت</b>${(p.stockQty||0)>0?` · بهای میانگین لایه‌ها: ${toman(Math.round(((typeof productInventoryValue==='function'?productInventoryValue(p.id):0)/(p.stockQty||1))))} ت`:''}<br><span style="opacity:.85;">«قیمت خرید» قیمت مرجع/کاتالوگ است و با ثبت خرید تأمین‌کننده خودکار عوض نمی‌شود.</span></div>`:''}
     ${p?`
     <div class="field" style="display:flex;gap:8px;align-items:end;">
       <div style="flex:1;"><label>تغییر سریع موجودی</label><input id="f-adjust-qty" type="text" inputmode="decimal" placeholder="مثلاً ۱۰"></div>

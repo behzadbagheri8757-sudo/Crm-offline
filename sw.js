@@ -12,7 +12,7 @@
  * (runtime caching) تا در دفعات بعد Offline هم در دسترس باشند.
  */
 
-const SW_VERSION = 'v1';
+const SW_VERSION = 'v2';
 const STATIC_CACHE = 'baqeri-crm-static-' + SW_VERSION;
 const RUNTIME_CACHE = 'baqeri-crm-runtime-' + SW_VERSION;
 
@@ -59,7 +59,12 @@ const PRECACHE_URLS = [
   './icons/icon-512.png',
   './icons/apple-touch-icon.png',
   './logo-export.png',
-  './logo.svg'
+  './logo.svg',
+
+  // ----- CDN dependencies (now precached) -----
+  'https://cdnjs.cloudflare.com/ajax/libs/xlsx/0.18.5/xlsx.full.min.js',
+  'https://cdnjs.cloudflare.com/ajax/libs/html2canvas/1.4.1/html2canvas.min.js',
+  'https://fonts.googleapis.com/css2?family=Vazirmatn:wght@400;500;600;700;800&display=swap'
 ];
 
 /* دامنه‌های CDN/فونت که به‌صورت runtime کش می‌شوند (چون امکان vendoring فیزیکی
@@ -104,11 +109,12 @@ self.addEventListener('fetch', (event) => {
   const isRuntimeHost = RUNTIME_CACHE_HOSTS.indexOf(url.hostname) !== -1;
 
   if (isSameOrigin) {
-    /* same-origin: Cache-First با fallback به شبکه، و به‌روزرسانی خاموش cache
-       در پس‌زمینه (stale-while-revalidate) تا نسخهٔ جدید دیپلوی هم بالاخره
-       جایگزین شود. */
+    /* For navigation requests, ignore query string so that pages like
+       customer.html?id=123 match the cached customer.html.
+       For all other resources, match normally. */
+    const matchOptions = (req.mode === 'navigate') ? { ignoreSearch: true } : {};
     event.respondWith(
-      caches.match(req).then((cached) => {
+      caches.match(req, matchOptions).then((cached) => {
         const networkFetch = fetch(req).then((res) => {
           if (res && res.ok) {
             const resClone = res.clone();

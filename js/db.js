@@ -288,7 +288,9 @@ async function saveData(){
   }catch(e){
     console.error('save failed', e);
     showToast('⚠️ ذخیره نشد، دوباره تلاش کن');
-    return;
+    // Re-throw so callers that `await saveData()` do not treat failure as success
+    // (no subsequent success toast / navigation as if data were persisted).
+    throw e;
   }
   // fire-and-forget: بکاپ خودکار کاملاً جدا از ذخیره‌ی اصلی اجرا می‌شود؛
   // ذخیره‌ی اصلی چند خط بالاتر با موفقیت کامل شده، پس هر خطایی اینجا فقط لاگ می‌شود

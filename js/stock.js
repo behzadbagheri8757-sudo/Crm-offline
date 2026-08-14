@@ -205,48 +205,6 @@ function applyPurchaseReturnStockEffects(purchase, returnLines, supplierName, da
   return { ok:true };
 }
 
-/**
- * adjustPurchaseLayerQty — API for purchase qty edit.
- * BLOCK if newQty < consumedQty; no mutation before BLOCK.
- */
-function adjustPurchaseLayerQty(purchaseId, productId, newQty, itemId){
-  const layers = layersForPurchase(purchaseId, productId, itemId);
-  if(!layers.length){
-    return { ok:false, error:'لایه خرید پیدا نشد' };
-  }
-  const layer = layers[0];
-  const snapshot = { qtyOriginal: layer.qtyOriginal, qtyRemaining: layer.qtyRemaining, status: layer.status };
-  const consumed = (layer.qtyOriginal||0) - (layer.qtyRemaining||0);
-  const nq = Number(newQty);
-  if(!(nq>=0) || isNaN(nq)) return { ok:false, error:'مقدار نامعتبر' };
-  if(nq < consumed){
-    return { ok:false, error:'نمی\u200cتوان مقدار را کمتر از مصرف\u200cشده ('+consumed+') قرار داد', consumed, noMutation:true };
-  }
-  const delta = nq - (layer.qtyOriginal||0);
-  layer.qtyOriginal = nq;
-  layer.qtyRemaining = (layer.qtyRemaining||0) + delta;
-  if(layer.qtyRemaining>0 && layer.status==='depleted') layer.status = 'open';
-  if(layer.qtyRemaining<=0){ layer.qtyRemaining=0; layer.status = layer.status==='voided' ? 'voided' : 'depleted'; }
-  const prod = data.products.find(x=>x.id===productId);
-  if(prod && delta!==0){
-    prod.stockQty = (prod.stockQty||0) + delta;
-    prod.stockLog = prod.stockLog||[];
-    prod.stockLog.push({id:uid(), date:todayISO(), type: delta>=0?'in':'out', qty:delta, note:'ویرایش مقدار خرید', purchaseId});
-  }
-  for(const s of (data.suppliers||[])){
-    const p = (s.purchases||[]).find(x=>x.id===purchaseId);
-    if(!p) continue;
-    if(p.productId===productId){
-      p.qty = nq;
-    }
-    if(Array.isArray(p.items) && itemId){
-      const it = p.items.find(x=>x.id===itemId);
-      if(it){ it.qty = nq; it.lineAmount = nq * (it.unitCost||0); }
-    }
-  }
-  return { ok:true, layer, delta };
-}
-
 /** Void purchase layers. Historical allocations remain; not consumable. */
 function voidPurchaseLayers(purchaseId){
   const layers = ensureInventoryLayers().filter(l=>l.purchaseId===purchaseId);

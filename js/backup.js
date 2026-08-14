@@ -139,53 +139,174 @@ function validateBackupShape(parsed){
   return arrays.every(k => parsed[k]===undefined || Array.isArray(parsed[k]));
 }
 
+/** اعتبارسنجی بخش اختیاری Prospect در بکاپ — فقط وقتی کلید وجود دارد */
+function validateProspectScoutShape(bundle){
+  if(bundle == null) return true;
+  if(typeof bundle !== 'object') return false;
+  if(bundle.shops !== undefined && !Array.isArray(bundle.shops)) return false;
+  if(bundle.routes !== undefined && !Array.isArray(bundle.routes)) return false;
+  return true;
+}
+
+/**
+ * تشخیص قالب بکاپ خودکار:
+ * - جدید: { format:'baqeri-auto-backup', version, ts, crm, prospectScout? }
+ * - قدیمی: خودِ آبجکت CRM (products/customers/…)
+ */
+function parseAutoBackupPayload(parsed){
+  if(parsed && typeof parsed === 'object' && parsed.format === 'baqeri-auto-backup' && parsed.crm && typeof parsed.crm === 'object'){
+    return {
+      crm: parsed.crm,
+      prospectScout: parsed.prospectScout != null ? parsed.prospectScout : null,
+      hasProspect: parsed.prospectScout != null,
+    };
+  }
+  return { crm: parsed, prospectScout: null, hasProspect: false };
+}
+
+/**
+ * بازیابی منطقی CRM (+ اختیاری Prospect) با اسنپ‌شات و rollback سطح اپلیکیشن.
+ * returns { ok:boolean }
+ * successToast: پیام موفقیت در صورت ok
+ */
+async function applyLogicalRestore(crmSource, prospectBundle, hasProspectSection, successToast){
+  const previousCrmJson = JSON.stringify(data);
+  let previousProspect = null;
+  try{
+    previousProspect = await exportProspectScoutBundle();
+  }catch(e){
+    console.error('pre-restore prospect export failed', e);
+  }
+
+  // اسنپ‌شات برای Undo بعدی
+  try{
+    await dbPut(PRERESTORE_KEY, previousCrmJson);
+  }catch(e){
+    console.error(e);
+    showToast('ذخیرهٔ نسخهٔ فعلی قبل از بازیابی ممکن نشد (خطای پایگاه داده)');
+    return { ok:false };
+  }
+  try{
+    if(previousProspect){
+      await dbPut(PRERESTORE_PROSPECT_KEY, JSON.stringify(previousProspect));
+    }
+  }catch(e){
+    console.error('prospect pre-restore snapshot failed', e);
+    // ادامه می‌دهیم؛ Undo ممکن است Prospect را نداشته باشد
+  }
+
+  const prepared = normalizeData(crmSource);
+  const oldData = data;
+  data = prepared;
+  try{
+    await saveData();
+  }catch(e){
+    console.error('CRM restore save failed', e);
+    data = oldData;
+    showToast('بازیابی ممکن نشد: خطا در ذخیرهٔ پایگاه داده');
+    return { ok:false };
+  }
+
+  if(hasProspectSection && prospectBundle){
+    const pOk = await restoreProspectScoutBundle(prospectBundle);
+    if(!pOk){
+      // rollback CRM
+      let crmRollbackOk = false;
+      try{
+        data = normalizeData(JSON.parse(previousCrmJson));
+        await saveData();
+        crmRollbackOk = true;
+      }catch(e){
+        console.error('CRM rollback after Prospect failure failed', e);
+      }
+      // rollback Prospect
+      let prospectRollbackOk = true;
+      if(previousProspect){
+        prospectRollbackOk = await restoreProspectScoutBundle(previousProspect);
+      }
+      if(!crmRollbackOk || !prospectRollbackOk){
+        showToast('بازیابی Prospect ناموفق بود و برگشت کامل ممکن نشد — وضعیت ممکن است ناقص باشد');
+      } else {
+        showToast('بازیابی ناموفق بود: خطای بازیابی Prospect — وضعیت قبلی برگردانده شد');
+      }
+      try{ render(); }catch(e){}
+      return { ok:false };
+    }
+  }
+
+  try{ render(); }catch(e){}
+  if(successToast) showToast(successToast);
+  return { ok:true };
+}
+
 async function importBackupJSON(file){
   try{
     const text = await file.text();
-    const parsed = JSON.parse(text);
+    let parsed;
+    try{
+      parsed = JSON.parse(text);
+    }catch(e){
+      showToast('فایل بکاپ معتبر نیست یا خراب است');
+      return false;
+    }
     if(!validateBackupShape(parsed)){
       showToast('این فایل، فایل بکاپ معتبری نیست');
-      return;
+      return false;
     }
-    // safety net: keep a snapshot of what's about to be overwritten
-    await dbPut(PRERESTORE_KEY, JSON.stringify(data));
-    // اسنپ‌شات Prospect فعلی برای Undo (حتی اگر فایل بکاپ Prospect نداشته باشد)
-    try{
-      const pSnap = await exportProspectScoutBundle();
-      if(pSnap) await dbPut(PRERESTORE_PROSPECT_KEY, JSON.stringify(pSnap));
-    }catch(e){ console.error('prospect pre-restore snapshot failed', e); }
-
-    data = normalizeData(parsed);
-    await saveData();
-    // فقط اگر بکاپ جدید شامل prospectScout باشد جایگزین می‌شود؛ بکاپ قدیمی Prospect فعلی را دست نمی‌زند
-    if(parsed.prospectScout){
-      await restoreProspectScoutBundle(parsed.prospectScout);
+    const hasProspect = parsed.prospectScout != null;
+    if(hasProspect && !validateProspectScoutShape(parsed.prospectScout)){
+      showToast('بخش Prospect در فایل بکاپ نامعتبر است');
+      return false;
     }
-    render();
-    showToast('اطلاعات با موفقیت بازیابی شد');
+    const result = await applyLogicalRestore(
+      parsed,
+      hasProspect ? parsed.prospectScout : null,
+      hasProspect,
+      'اطلاعات با موفقیت بازیابی شد'
+    );
+    return !!result.ok;
   }catch(e){
     console.error(e);
-    showToast('فایل بکاپ معتبر نیست یا خراب است');
+    showToast('بازیابی ممکن نشد');
+    return false;
   }
 }
 
 async function undoLastRestore(){
   try{
     const snap = await dbGet(PRERESTORE_KEY);
-    if(!snap || !snap.value){ showToast('نسخه‌ی قبل از بازیابی موجود نیست'); return; }
-    data = normalizeData(JSON.parse(snap.value));
-    await saveData();
+    if(!snap || !snap.value){ showToast('نسخه‌ی قبل از بازیابی موجود نیست'); return false; }
+    let previousProspect = null;
     try{
       const pSnap = await dbGet(PRERESTORE_PROSPECT_KEY);
-      if(pSnap && pSnap.value){
-        await restoreProspectScoutBundle(JSON.parse(pSnap.value));
+      if(pSnap && pSnap.value) previousProspect = JSON.parse(pSnap.value);
+    }catch(e){ console.error('read prospect pre-restore failed', e); }
+
+    data = normalizeData(JSON.parse(snap.value));
+    try{
+      await saveData();
+    }catch(e){
+      console.error(e);
+      showToast('بازگرداندن ممکن نشد: خطا در ذخیرهٔ پایگاه داده');
+      return false;
+    }
+
+    let prospectOk = true;
+    if(previousProspect){
+      prospectOk = await restoreProspectScoutBundle(previousProspect);
+      if(!prospectOk){
+        showToast('CRM برگشت داده شد، ولی بازیابی Prospect ناقص بود');
+        try{ render(); }catch(e){}
+        return false;
       }
-    }catch(e){ console.error('prospect undo restore failed', e); }
-    render();
+    }
+    try{ render(); }catch(e){}
     showToast('به حالت قبل از بازیابی برگشت');
+    return true;
   }catch(e){
     console.error(e);
     showToast('بازگرداندن ممکن نشد');
+    return false;
   }
 }
 
@@ -201,7 +322,17 @@ async function autoBackupTick(){
   if(Date.now() - last < AUTO_BACKUP_INTERVAL_MS) return; // هنوز زوده، لازم نیست نسخه‌ی جدید بگیریم
   const ts = Date.now();
   const key = AUTO_BACKUP_PREFIX + ts;
-  await dbPut(key, JSON.stringify(data));
+  // قالب جدید: CRM + Prospect؛ بکاپ‌های قدیمی فقط CRM بودند و همچنان قابل بازیابی‌اند
+  let prospect = null;
+  try{ prospect = await exportProspectScoutBundle(); }catch(e){ console.error('auto backup prospect export failed', e); }
+  const payload = {
+    format: 'baqeri-auto-backup',
+    version: 1,
+    ts,
+    crm: data,
+    prospectScout: prospect,
+  };
+  await dbPut(key, JSON.stringify(payload));
   list.push({key, ts});
   while(list.length > AUTO_BACKUP_MAX){
     const old = list.shift();
@@ -211,19 +342,37 @@ async function autoBackupTick(){
 }
 
 async function restoreFromAutoBackup(key){
-  if(!confirm('مطمئنی؟ اطلاعات فعلی با این نسخه‌ی بکاپ خودکار جایگزین می‌شه.')) return;
+  if(!confirm('مطمئنی؟ اطلاعات فعلی با این نسخه‌ی بکاپ خودکار جایگزین می‌شه.')) return false;
   try{
     const snap = await dbGet(key);
-    if(!snap || !snap.value){ showToast('این نسخه‌ی بکاپ پیدا نشد'); return; }
-    // مثل بازیابی از فایل: قبل از جایگزینی، وضعیت فعلی هم نگه داشته می‌شود
-    await dbPut(PRERESTORE_KEY, JSON.stringify(data));
-    data = normalizeData(JSON.parse(snap.value));
-    await saveData();
-    render();
-    showToast('از بکاپ خودکار بازیابی شد');
+    if(!snap || !snap.value){ showToast('این نسخه‌ی بکاپ پیدا نشد'); return false; }
+    let parsed;
+    try{
+      parsed = JSON.parse(snap.value);
+    }catch(e){
+      showToast('این نسخه‌ی بکاپ خراب است');
+      return false;
+    }
+    const parts = parseAutoBackupPayload(parsed);
+    if(!validateBackupShape(parts.crm)){
+      showToast('این نسخه‌ی بکاپ معتبر نیست');
+      return false;
+    }
+    if(parts.hasProspect && !validateProspectScoutShape(parts.prospectScout)){
+      showToast('بخش Prospect در این بکاپ خودکار نامعتبر است');
+      return false;
+    }
+    const result = await applyLogicalRestore(
+      parts.crm,
+      parts.hasProspect ? parts.prospectScout : null,
+      parts.hasProspect,
+      'از بکاپ خودکار بازیابی شد'
+    );
+    return !!result.ok;
   }catch(e){
     console.error(e);
     showToast('بازیابی از بکاپ خودکار ممکن نشد');
+    return false;
   }
 }
 

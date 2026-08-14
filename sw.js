@@ -3,21 +3,14 @@
  *
  * هدف: Offline واقعی بدون هیچ دخالت در منطق مالی/IndexedDB.
  * این فایل هیچ درخواستی به IndexedDB یا هیچ API مالی نمی‌فرستد و هیچ داده‌ای را
- * تغییر نمی‌دهد؛ فقط فایل‌های استاتیک (HTML/CSS/JS/manifest/icons/تصاویر) و
- * منابع CDN (xlsx, html2canvas, فونت Vazirmatn) را cache می‌کند.
- *
- * نکته مهم دربارهٔ CDN: چون امکان دانلود و vendoring فیزیکی این فایل‌ها در محیط
- * تولید این تغییرات وجود نداشت، به‌جای انتقال فیزیکی، این Service Worker خودِ
- * دستگاه کاربر را وادار می‌کند در اولین استفادهٔ آنلاین این منابع را cache کند
- * (runtime caching) تا در دفعات بعد Offline هم در دسترس باشند.
+ * تغییر نمی‌دهد؛ فقط فایل‌های استاتیک (HTML/CSS/JS/manifest/icons/تصاویر) را
+ * cache می‌کند. منابع CDN با runtime caching مدیریت می‌شوند.
  */
 
-const SW_VERSION = 'v2';
+const SW_VERSION = 'v3';
 const STATIC_CACHE = 'baqeri-crm-static-' + SW_VERSION;
 const RUNTIME_CACHE = 'baqeri-crm-runtime-' + SW_VERSION;
 
-/* لیست دقیق فایل‌های same-origin پروژه — از روی ساختار واقعی فایل‌ها
-   استخراج شده، هیچ مسیری حدسی نیست. */
 const PRECACHE_URLS = [
   './',
   './index.html',
@@ -59,16 +52,9 @@ const PRECACHE_URLS = [
   './icons/icon-512.png',
   './icons/apple-touch-icon.png',
   './logo-export.png',
-  './logo.svg',
-
-  // ----- CDN dependencies (now precached) -----
-  'https://cdnjs.cloudflare.com/ajax/libs/xlsx/0.18.5/xlsx.full.min.js',
-  'https://cdnjs.cloudflare.com/ajax/libs/html2canvas/1.4.1/html2canvas.min.js',
-  'https://fonts.googleapis.com/css2?family=Vazirmatn:wght@400;500;600;700;800&display=swap'
+  './logo.svg'
 ];
 
-/* دامنه‌های CDN/فونت که به‌صورت runtime کش می‌شوند (چون امکان vendoring فیزیکی
-   در این محیط نبود — رجوع کنید به توضیح بالای فایل). */
 const RUNTIME_CACHE_HOSTS = [
   'cdnjs.cloudflare.com',
   'fonts.googleapis.com',
@@ -97,11 +83,6 @@ self.addEventListener('activate', (event) => {
 
 self.addEventListener('fetch', (event) => {
   const req = event.request;
-
-  /* فقط GET؛ درخواست‌های دیگر (اگر روزی اضافه شوند) دست‌نخورده به شبکه می‌روند
-     و SW اصلاً دخالت نمی‌کند — این شامل هیچ درخواست IndexedDB نمی‌شود چون
-     IndexedDB اصلاً از طریق fetch/network کار نمی‌کند و این SW هیچ راهی برای
-     رهگیری آن ندارد. */
   if (req.method !== 'GET') return;
 
   const url = new URL(req.url);
@@ -109,9 +90,6 @@ self.addEventListener('fetch', (event) => {
   const isRuntimeHost = RUNTIME_CACHE_HOSTS.indexOf(url.hostname) !== -1;
 
   if (isSameOrigin) {
-    /* For navigation requests, ignore query string so that pages like
-       customer.html?id=123 match the cached customer.html.
-       For all other resources, match normally. */
     const matchOptions = (req.mode === 'navigate') ? { ignoreSearch: true } : {};
     event.respondWith(
       caches.match(req, matchOptions).then((cached) => {
@@ -124,7 +102,6 @@ self.addEventListener('fetch', (event) => {
         }).catch(() => null);
 
         if (cached) {
-          /* نسخهٔ cache را فوراً برگردان؛ شبکه در پس‌زمینه به‌روزرسانی می‌کند */
           networkFetch;
           return cached;
         }
@@ -135,12 +112,10 @@ self.addEventListener('fetch', (event) => {
   }
 
   if (isRuntimeHost) {
-    /* CDN/فونت خارجی: Cache-First، و اگر در cache نبود از شبکه بگیر و ذخیره کن. */
     event.respondWith(
       caches.match(req).then((cached) => {
         if (cached) return cached;
         return fetch(req).then((res) => {
-          /* پاسخ‌های فونت/CDN معمولاً opaque یا cors هستند؛ هر دو قابل cache‌اند. */
           if (res) {
             const resClone = res.clone();
             caches.open(RUNTIME_CACHE).then((cache) => cache.put(req, resClone));
@@ -151,7 +126,4 @@ self.addEventListener('fetch', (event) => {
     );
     return;
   }
-
-  /* هر درخواست دیگر (خارج از same-origin و خارج از لیست CDN شناخته‌شده) را
-     دست‌نخورده می‌گذاریم — SW هیچ دخالتی نمی‌کند. */
 });
